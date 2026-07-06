@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+qa_fig_*.svg
+qa_fig_*.pdf
+.env

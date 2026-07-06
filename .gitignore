@@ -1,0 +1,21 @@
+# --- Frontend: excluded from this API-only repo (has its own separate repo) ---
+frontend/
+
+# --- Secrets (belt-and-suspenders; also covered by backend/frontend .gitignore) ---
+.env
+.env.*
+
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+
+# --- Logs ---
+*.log
+
+# --- Generated figure / QA artifacts ---
+backend/qa_fig_*.svg
+backend/qa_fig_*.pdf
+qa/*.pdf
+qa/*.svg
+qa/node_modules/

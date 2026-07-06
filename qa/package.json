@@ -1,0 +1,8 @@
+{
+  "name": "patentgeyser-qa",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "latest"
+  }
+}
