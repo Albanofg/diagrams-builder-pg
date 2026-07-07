@@ -88,7 +88,8 @@ def generate(
 
     try:
         graph = extract_graph(text)
-    except ExtractionError:
+    except ExtractionError as exc:
+        print(f"EXTRACTION FAILED: {exc}", flush=True)
         raise HTTPException(status_code=400, detail=PARSE_ERROR)
 
     figures = []

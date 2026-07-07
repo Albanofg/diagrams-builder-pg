@@ -131,7 +131,8 @@ def _run_drafter(figure: PlannedFigure, ledger_json: str,
             model=OPENAI_MODEL, input=prompt, text_format=DraftFigure,
         )
         return response.output_parsed
-    except APIError:
+    except APIError as exc:
+        print(f"DRAFTER FAILED (figure skipped): {exc}", flush=True)
         return None  # degrade gracefully: skip this figure, keep the rest
 
 
