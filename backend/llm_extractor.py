@@ -23,7 +23,7 @@ from models import (
     DraftFigure, Edge, Figure, FigurePlan, Node, PatentGraph, PlannedFigure,
 )
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4").strip()
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 MAX_FIGURES = 8
 MAX_PARALLEL_DRAFTERS = 4
@@ -90,7 +90,9 @@ def extract_graph(text: str) -> PatentGraph:
 
 def _client():
     from openai import OpenAI
-    return OpenAI()
+    # Strip whitespace/newlines from the key — a stray trailing newline makes an
+    # "Illegal header value" that the SDK surfaces only as a bare "Connection error."
+    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "").strip())
 
 
 def _load_prompt(name: str) -> str:
@@ -106,9 +108,7 @@ def _run_planner(text: str) -> FigurePlan:
             model=OPENAI_MODEL, input=prompt, text_format=FigurePlan,
         )
     except APIError as exc:
-        import traceback
-        traceback.print_exc()  # full chain (e.g. httpx.ConnectError) -> Render logs
-        raise ExtractionError(f"Planner failed: {exc!r} cause={exc.__cause__!r}") from exc
+        raise ExtractionError(f"Planner failed: {exc}") from exc
     plan = response.output_parsed
     if plan is None or not plan.figures:
         raise ExtractionError("Planner returned no figures.")
