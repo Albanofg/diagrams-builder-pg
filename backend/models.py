@@ -125,3 +125,41 @@ class GeneratedFigure(BaseModel):
 
 class GenerateResponse(BaseModel):
     figures: List[GeneratedFigure]
+
+
+# ── Plan mode (POST /api/v1/draw) ──────────────────────────────────────────
+# The consuming app runs its OWN planner and sends a finished plan; we skip our
+# planner and run drafter -> layout -> render only. Pydantic ignores any extra
+# fields the caller carries for its own document (briefDescription, etc.).
+
+
+class PlanFigure(BaseModel):
+    """One ready FIGURE_ASSIGNMENT from the caller's planner."""
+    figNumber: int
+    figType: FigType
+    title: str
+    outline: str
+    numerals: List[str] = Field(default_factory=list)
+
+
+class DrawPlan(BaseModel):
+    figures: List[PlanFigure]
+    numerals: List[LedgerEntry] = Field(default_factory=list)
+
+
+class DrawRequest(BaseModel):
+    plan: DrawPlan
+    spec: Optional[str] = None  # optional fallback context; outline is authoritative
+
+
+class DrawnFigure(BaseModel):
+    figNumber: int              # echoes plan.figures[].figNumber, for caller matching
+    id: str
+    title: str
+    svgData: str
+    pdfBase64: str
+    numerals: List[str] = Field(default_factory=list)  # numerals ACTUALLY drawn
+
+
+class DrawResponse(BaseModel):
+    figures: List[DrawnFigure]

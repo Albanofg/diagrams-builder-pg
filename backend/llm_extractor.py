@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import List, Optional, Set
 
 from models import (
-    DraftFigure, Edge, Figure, FigurePlan, Node, PatentGraph, PlannedFigure,
+    DraftFigure, Edge, Figure, FigurePlan, LedgerEntry, Node, PatentGraph,
+    PlannedFigure,
 )
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4").strip()
@@ -82,6 +83,50 @@ def extract_graph(text: str) -> PatentGraph:
 
     stated = {e.ref for e in plan.numerals if e.definedInSpec}
     stated |= set(re.findall(r"\((\d{1,4})\)", text))
+    return _harmonize(PatentGraph(figures=figures), stated)
+
+
+# -- plan mode: draw a caller-supplied plan (skip the planner) -----------------
+
+
+def draw_from_plan(
+    planned: List[PlannedFigure],
+    ledger: List[LedgerEntry],
+    spec: str = "",
+) -> PatentGraph:
+    """Plan mode entry point. The caller already ran the planner, so we SKIP it
+    and run only drafter -> convert -> harmonize on the supplied plan.
+
+    THE LEDGER IS LAW: every ledger numeral is bound as `stated` so _harmonize
+    preserves the caller's numerals instead of reissuing a fresh 100,102,...
+    sequence. Mirrors extract_graph()'s tail, minus _run_planner."""
+    planned = planned[:MAX_FIGURES]
+    ledger_json = FigurePlan(figures=[], numerals=ledger).model_dump_json(
+        include={"numerals"}
+    )
+
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DRAFTERS) as pool:
+        drafts = list(pool.map(
+            lambda figure: _run_drafter(figure, ledger_json, spec), planned,
+        ))
+
+    figures: List[Figure] = []
+    for planned_figure, draft in zip(planned, drafts):
+        if draft is None:
+            continue  # a drafter call failed — skip that figure, keep the rest
+        figure = _convert_figure(draft)
+        if not figure.nodes:
+            continue
+        # Trust the plan's figNumber, never the LLM's echo, so a dropped figure
+        # doesn't renumber the rest.
+        figure.figure_number = planned_figure.figNumber
+        figures.append(figure)
+
+    if not figures:
+        raise ExtractionError("No drawable figures could be drafted from the plan.")
+
+    figures.sort(key=lambda figure: figure.figure_number)
+    stated = {row.ref for row in ledger}
     return _harmonize(PatentGraph(figures=figures), stated)
 
 
