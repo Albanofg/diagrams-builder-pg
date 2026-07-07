@@ -106,7 +106,9 @@ def _run_planner(text: str) -> FigurePlan:
             model=OPENAI_MODEL, input=prompt, text_format=FigurePlan,
         )
     except APIError as exc:
-        raise ExtractionError(f"Planner failed: {exc}") from exc
+        import traceback
+        traceback.print_exc()  # full chain (e.g. httpx.ConnectError) -> Render logs
+        raise ExtractionError(f"Planner failed: {exc!r} cause={exc.__cause__!r}") from exc
     plan = response.output_parsed
     if plan is None or not plan.figures:
         raise ExtractionError("Planner returned no figures.")
