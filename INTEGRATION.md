@@ -80,8 +80,14 @@ Liveness probe. No auth. Use it to warm the service before a real call (§7).
 
 ### `POST /api/v1/generate`
 
-The one endpoint that does the work. Auth required. Synchronous — the HTTP response
-returns only when all figures are rendered.
+Raw text → full pipeline (planner → drafter → layout → render). Auth required.
+Synchronous — the response returns only when all figures are rendered. §5–§6.
+
+### `POST /api/v1/draw`
+
+**Plan mode.** For callers that run their own planner: send a *finished plan* and the
+service **skips its planner**, running only drafter → layout → render. Auth required.
+Full request/response contract in **§6a**.
 
 ---
 
@@ -183,6 +189,109 @@ function Figure({ fig }: { fig: { id: string; title: string; svgData: string } }
 ```ts
 const pdfBytes = Buffer.from(fig.pdfBase64, "base64");
 // fs.writeFileSync(`${fig.id}.pdf`, pdfBytes)
+```
+
+---
+
+## 6a. Plan mode — `POST /api/v1/draw` (skip the planner)
+
+For callers that already run their **own** planner (e.g. app-2, which holds the full
+disclosure and its own LLM stack), this endpoint accepts a **finished plan** and runs
+only `drafter → layout → render` — the service's planner LLM pass is skipped. Less time
+per request and bounded input. `/generate` (raw text → everything) stays available and
+unchanged.
+
+> **Source of truth for the plan schema:** `DIAGRAM_SERVICE_PLAN_MODE.md` in the
+> consuming app's ("app-2") repo. That file defines the plan the caller's planner
+> produces; this section mirrors it. If it changes, this section follows.
+
+Auth and headers are **identical to `/generate`** (`X-API-Key`, `Content-Type: application/json`).
+
+### Request body
+
+```jsonc
+{
+  "plan": {
+    "figures": [
+      {
+        "figNumber": 1,                    // 1-based; echoed back for matching
+        "figType": "system",              // system|module|flowchart|dataflow|sequence|state|hardware|record
+        "title": "System Architecture Overview",
+        "outline": "Draw DEVICE (100) as a container. Inside it: CAPTURE INTERFACE (102) coupled to TRIGGER DETECTOR (104); … — every element with its numeral + catchword, every connection and its nature, every containment, in drawing order.",
+        "numerals": ["100", "102", "104"]  // the numerals THIS figure may use
+      }
+      // …up to 8 figures (MAX_FIGURES)
+    ],
+    "numerals": [                          // global ledger: ref -> canonical feature
+      { "ref": "100", "feature": "Device", "figures": [1], "definedInSpec": false },
+      { "ref": "102", "feature": "Capture Interface", "figures": [1, 2], "definedInSpec": true }
+    ]
+  },
+  "spec": "optional short context string"  // OPTIONAL — the outline is authoritative; usually omit
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `plan.figures[]` | array | yes | One entry per figure to draw — each is a ready assignment for the drafter. |
+| `plan.figures[].figNumber` | int | yes | 1-based. Echoed back in the response for matching. |
+| `plan.figures[].figType` | enum | yes | One of the 8 values above. Anything else → `422`. |
+| `plan.figures[].title` | string | yes | Used verbatim as the figure title. |
+| `plan.figures[].outline` | string | yes | **Authoritative** drawing instructions — names every element (numeral + catchword), every connection and its nature, and every containment, in drawing order. |
+| `plan.figures[].numerals[]` | string[] | yes | The numerals this figure is allowed to use. |
+| `plan.numerals[]` | array | yes | Global numeral **ledger**: `ref → feature`, with `figures[]` and `definedInSpec`. |
+| `spec` | string | no | Optional fallback context. The outline stands alone when omitted. |
+
+- Extra fields the caller carries on a figure (`briefDescription`, `detailedDescription`,
+  `illustrates`, …) are **ignored** — send them freely.
+- `plan.figures` empty or malformed → `400`. Figures beyond 8 are dropped (`MAX_FIGURES`).
+
+### Response (`200 OK`)
+
+Same shape as `/generate`, **plus `figNumber` and `numerals`** per figure:
+
+```jsonc
+{
+  "figures": [
+    {
+      "figNumber": 1,                    // echoes plan.figures[].figNumber
+      "id": "fig-1",
+      "title": "System Architecture Overview",
+      "svgData": "<svg …>…</svg>",       // raw SVG markup (same as /generate)
+      "pdfBase64": "JVBERi0…",           // bare base64 PDF (same as /generate)
+      "numerals": ["100", "102", "104"]  // the numerals ACTUALLY drawn
+    }
+    // …one per figure successfully drawn, in figNumber order
+  ]
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `figNumber` | int | The plan's `figNumber` for this figure. Join the returned svg/pdf back to its plan entry (and its description). |
+| `numerals` | string[] | The numerals the drawing **actually placed** (after the drafter's legibility budget). Reconcile your stored description against these so text and drawing never disagree. |
+| `id`, `title`, `svgData`, `pdfBase64` | — | Same as `/generate` (§6). |
+
+- **The ledger is law.** The numerals you send are preserved as-is — the service does
+  **not** renumber them. `numerals` reflects exactly what was drawn.
+- **Partial success:** a per-figure drafter failure drops that one figure and keeps the
+  rest, so you may receive **fewer figures than planned**. Match by `figNumber` and treat
+  a missing number as a figure to retry.
+- Everything else — auth, `/health`, `MAX_FIGURES`, timeouts (§7), error shapes (§10) —
+  is identical to `/generate`.
+
+### Example call (server-side)
+
+```ts
+const r = await fetch(`${API_URL}/api/v1/draw`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
+  body: JSON.stringify({ plan }), // plan = your planner's output (see schema above)
+  signal: AbortSignal.timeout(60_000),
+});
+if (!r.ok) throw new Error((await r.json()).detail ?? "draw failed");
+const { figures } = await r.json();
+// figures: [{ figNumber, id, title, svgData, pdfBase64, numerals }]
 ```
 
 ---
