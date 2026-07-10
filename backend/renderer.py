@@ -481,6 +481,121 @@ def _select_route(laid: LaidFigure, edge, index: int,
     return min(candidates, key=lambda c: _crossings(c, laid, edge, 0.0, 0.0))
 
 
+# ── line jumps (hop-overs at unavoidable crossings) ───────────────────────
+# The A* router MINIMIZES crossings, but some remain unavoidable. Where two
+# connectors cross WITHOUT connecting, draw a small semicircular hop on the
+# horizontal line so it visually passes OVER the vertical one — the standard
+# "these paths cross, they do not join" convention (Visio "arc jump",
+# draw.io "line jump"). A crossing earns a hop ONLY when the meeting point is
+# STRICTLY INTERIOR to both segments; shared-node attaches, corners and trunk
+# T-taps all land on a segment endpoint, so they fail the strict test and get
+# no hop — correct, those are real connections.
+
+JUMP_R = 1.4          # hop-over radius (~1/3 of GRID); the bulge over the line
+JUMP_EPS = 0.5        # strict-interior margin; below it a "crossing" is a join
+
+
+def _seg_orient(p1, p2) -> Optional[str]:
+    (x1, y1), (x2, y2) = p1, p2
+    if abs(y1 - y2) < 1e-6 and abs(x1 - x2) > 1e-6:
+        return "h"
+    if abs(x1 - x2) < 1e-6 and abs(y1 - y2) > 1e-6:
+        return "v"
+    return None            # zero-length or slanted (fallback lead): never hops
+
+
+def _near_vertex(x: float, y: float, pts, r: float) -> bool:
+    r2 = r * r
+    return any((x - vx) ** 2 + (y - vy) ** 2 < r2 for vx, vy in pts)
+
+
+def _plan_jumps(routes, r: float = JUMP_R, eps: float = JUMP_EPS) -> Dict[int, list]:
+    """Map edge_index -> [(vx, hy, r), ...] hop points on that edge's H runs.
+
+    Deterministic regardless of edge order: the rule keys off ORIENTATION,
+    so at every genuine crossover exactly one line — the horizontal one —
+    hops (never both; a double hop is wrong).
+    """
+    edge_segs = []
+    for _, pts in routes:
+        edge_segs.append([(o, p1, p2)
+                          for p1, p2 in zip(pts, pts[1:])
+                          if (o := _seg_orient(p1, p2))])
+    polylines = [pts for _, pts in routes]
+
+    jumps: Dict[int, list] = {}
+    for i, segs_i in enumerate(edge_segs):
+        for orient_i, a_i, b_i in segs_i:
+            if orient_i != "h":
+                continue
+            hy = a_i[1]
+            hx_lo, hx_hi = min(a_i[0], b_i[0]), max(a_i[0], b_i[0])
+            for j, segs_j in enumerate(edge_segs):
+                if j == i:
+                    continue
+                for orient_j, a_j, b_j in segs_j:
+                    if orient_j != "v":
+                        continue
+                    vx = a_j[0]
+                    vy_lo, vy_hi = min(a_j[1], b_j[1]), max(a_j[1], b_j[1])
+                    # A real crossover == strictly interior to BOTH segments.
+                    if not (hx_lo + eps < vx < hx_hi - eps
+                            and vy_lo + eps < hy < vy_hi - eps):
+                        continue
+                    # Don't distort a bend: skip near any vertex of either line.
+                    if (_near_vertex(vx, hy, polylines[i], r)
+                            or _near_vertex(vx, hy, polylines[j], r)):
+                        continue
+                    bucket = jumps.setdefault(i, [])
+                    # Merge hops clustered on one run (rare; router avoids it).
+                    if any(abs(hx - vx) < 2 * r and abs(hyy - hy) < 1e-6
+                           for hx, hyy, _ in bucket):
+                        continue
+                    bucket.append((vx, hy, r))
+    return jumps
+
+
+def _jump_avoid_segments(jumps: Dict[int, list]) -> list:
+    """Inverted-U footprint (≈2r × r above each crossing) as avoidance segments,
+    so text planners and the audit treat the bulge as part of the line."""
+    segs = []
+    for hops in jumps.values():
+        for vx, hy, r in hops:
+            top = hy - r
+            segs.append(((vx - r, top), (vx + r, top)))    # crown
+            segs.append(((vx - r, hy), (vx - r, top)))      # left shoulder
+            segs.append(((vx + r, hy), (vx + r, top)))      # right shoulder
+    return segs
+
+
+def _path_with_jumps(points, jumps) -> Path:
+    """Splice a semicircle bulging up (−y) into each horizontal run a jump sits
+    on. `jumps`: (x, y, r) crossovers owned by THIS edge's horizontal segments.
+    """
+    verts = [points[0]]
+    codes = [Path.MOVETO]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        horizontal = abs(y0 - y1) < 1e-6
+        step = 1 if x1 >= x0 else -1
+        hops = sorted(
+            (j for j in jumps
+             if horizontal and abs(j[1] - y0) < 1e-6
+             and min(x0, x1) < j[0] < max(x0, x1)),
+            key=lambda j: abs(j[0] - x0))          # in travel order along the run
+        for jx, _jy, r in hops:
+            enter = jx - step * r
+            verts.append((enter, y0))
+            codes.append(Path.LINETO)
+            # unit top-half arc; abs(uy) forces the bulge up whichever half it is
+            arc = Path.arc(180, 0) if step > 0 else Path.arc(0, 180)
+            for (ux, uy), c in zip(arc.vertices[1:], arc.codes[1:]):  # drop MOVETO
+                verts.append((jx + ux * r, y0 - abs(uy) * r))
+                codes.append(c)
+        verts.append((x1, y1))
+        codes.append(Path.LINETO)
+    return Path(verts, codes)
+
+
 # ── planning: numerals and labels positioned against ALL geometry ─────────
 
 
@@ -696,6 +811,13 @@ def render_figure(laid: LaidFigure, total_sheets: int = 1) -> tuple[str, str]:
     routes = [(edge, routed[index]) for index, edge in enumerate(laid.edges)]
     route_segments = [seg for _, pts in routes for seg in zip(pts, pts[1:])]
 
+    # Plan hop-overs for the crossings the router could not avoid, BEFORE any
+    # text is placed, and fold each hop's footprint into the geometry text
+    # must clear — so numerals/labels route around the bulge and the audit
+    # (which sees the same avoid list) stays honest.
+    jumps = _plan_jumps(routes)
+    route_segments += _jump_avoid_segments(jumps)
+
     node_full_rects = []
     node_obstacle_rects = []
     for node in laid.nodes.values():
@@ -746,8 +868,8 @@ def render_figure(laid: LaidFigure, total_sheets: int = 1) -> tuple[str, str]:
     # 4. DRAW from the plans.
     for node in laid.nodes.values():
         _draw_node(ax, node, numeral_plans.get(node.id))
-    for edge, points in routes:
-        _draw_arrow(ax, edge, points)
+    for index, (edge, points) in enumerate(routes):
+        _draw_arrow(ax, edge, points, jumps.get(index, ()))
     for text, (tx, ty, ha, va), _ in label_plans:
         ax.text(tx, ty, text, ha=ha, va=va, fontsize=EDGE_FONT)
 
@@ -863,10 +985,11 @@ def _draw_numeral(ax, node: LaidNode, plan: Optional[tuple]) -> None:
 # ── edges ───────────────────────────────────────────────────────────────────
 
 
-def _draw_arrow(ax, edge, points: list) -> None:
+def _draw_arrow(ax, edge, points: list, jumps=()) -> None:
     arrowstyle = {"none": "-", "both": "<|-|>"}.get(edge.arrow, "-|>")
+    path = _path_with_jumps(points, jumps) if jumps else Path(points)
     ax.add_patch(FancyArrowPatch(
-        path=Path(points),
+        path=path,
         arrowstyle=arrowstyle, mutation_scale=12,
         linewidth=LINE_W, edgecolor="black", facecolor="black", fill=True,
         linestyle="solid" if edge.style != "dashed" else (0, (4.0, 2.5)),
