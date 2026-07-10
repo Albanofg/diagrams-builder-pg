@@ -251,6 +251,46 @@ class _GridRouter:
             if counts:
                 counts[axis] = max(0, counts[axis] - 1)
 
+    def segment_clear(self, p1, p2) -> bool:
+        """True if the segment keeps clear of every box's inflated wall, EXCEPT
+        near its own endpoints where it may attach to / leave a box. So a line
+        can exit a box, but may not run ALONG a box edge (the hugging /
+        doubled-outline look) far from where it connects."""
+        keep = INFLATE + GRID          # attach/detach tolerance around an end
+        for cell in self._cells(min(p1[0], p2[0]) - 0.1, min(p1[1], p2[1]) - 0.1,
+                                max(p1[0], p2[0]) + 0.1, max(p1[1], p2[1]) + 0.1):
+            if cell not in self.blocked:
+                continue
+            cx, cy = self._center(cell)
+            near_end = min(abs(cx - p1[0]) + abs(cy - p1[1]),
+                           abs(cx - p2[0]) + abs(cy - p2[1]))
+            if near_end > keep:
+                return False
+        return True
+
+    def straighten(self, points: list) -> list:
+        """Collapse staircases into clean single bends: greedily replace any
+        two consecutive bends (a Z-jog) with one L-corner when that corner
+        clears every box. Never routes through a node; only removes bends,
+        so it can only make a route simpler than A* already made it."""
+        pts = _simplify(points)
+        changed = True
+        while changed and len(pts) > 3:
+            changed = False
+            for i in range(1, len(pts) - 2):
+                a, d = pts[i - 1], pts[i + 2]
+                for corner in ((a[0], d[1]), (d[0], a[1])):
+                    if (corner != pts[i]
+                            and self.segment_clear(a, corner)
+                            and self.segment_clear(corner, d)):
+                        cand = _simplify(pts[:i] + [corner] + pts[i + 2:])
+                        if len(cand) < len(pts):
+                            pts, changed = cand, True
+                            break
+                if changed:
+                    break
+        return pts
+
     def _try_anchor_pairs(self, source, target, exits, entries, trunk):
         best = None
         for exit_side in exits:
@@ -479,6 +519,82 @@ def _select_route(laid: LaidFigure, edge, index: int,
     candidates = _route_candidates(source, target, 0.0, 0.0,
                                    stagger=(index % 3) * 3.0)
     return min(candidates, key=lambda c: _crossings(c, laid, edge, 0.0, 0.0))
+
+
+# ── bus consolidation: merge near-parallel structural lanes ────────────────
+# A* routes each edge independently, so a shared spine feeding many taps can
+# split across two lanes one grid-cell apart — it reads as a line duplicating
+# itself. For STRUCTURAL (headless) edges only — where the bus-with-taps look
+# is the convention — snap near-parallel, span-overlapping segments onto one
+# shared lane. Moving an interior segment to a target coordinate only sets its
+# two endpoints; the adjacent perpendicular segments stretch, so the polyline
+# stays connected and orthogonal. Every move is box-clearance validated.
+
+MERGE_DIST = 2 * GRID          # only collapse lanes within this gap (mm)
+
+
+def _consolidate_lanes(routes, router, merge_dist: float = MERGE_DIST):
+    pts_by_edge = {idx: [list(p) for p in pts]
+                   for idx, (_, pts) in enumerate(routes)}
+    trunk = [idx for idx, (edge, _) in enumerate(routes)
+             if edge.arrow == "none"]
+
+    for axis in ("h", "v"):
+        con, span = (1, 0) if axis == "h" else (0, 1)   # constant vs spanning
+        segs = []                                       # [idx, i, coord, lo, hi]
+        for idx in trunk:
+            pts = pts_by_edge[idx]
+            for i in range(1, len(pts) - 2):            # interior segments only
+                a, b = pts[i], pts[i + 1]
+                if abs(a[con] - b[con]) < 1e-6 and abs(a[span] - b[span]) > 1e-6:
+                    segs.append([idx, i, a[con],
+                                 min(a[span], b[span]), max(a[span], b[span])])
+
+        used = [False] * len(segs)
+        for s in range(len(segs)):
+            if used[s]:
+                continue
+            group = [s]
+            used[s] = True
+            changed = True
+            while changed:                              # grow the lane cluster
+                changed = False
+                for t in range(len(segs)):
+                    if used[t]:
+                        continue
+                    # Same lane band, and spans overlap OR meet at a shared
+                    # junction (within a cell) — so a bus and a stub peeling the
+                    # other way off the same exit still merge onto one lane.
+                    if any(abs(segs[g][2] - segs[t][2]) <= merge_dist
+                           and segs[t][3] <= segs[g][4] + GRID
+                           and segs[t][4] >= segs[g][3] - GRID
+                           for g in group):
+                        group.append(t)
+                        used[t] = True
+                        changed = True
+            if len(group) < 2:
+                continue
+            # Target lane = the coordinate the most segments already sit on.
+            tally: Dict[float, int] = {}
+            for g in group:
+                key = round(segs[g][2], 3)
+                tally[key] = tally.get(key, 0) + 1
+            target = max(tally, key=lambda k: (tally[k], -abs(k)))
+            for g in group:
+                if abs(segs[g][2] - target) < 1e-6:
+                    continue
+                idx, i = segs[g][0], segs[g][1]
+                pts = pts_by_edge[idx]
+                na, nb = list(pts[i]), list(pts[i + 1])
+                na[con] = nb[con] = target
+                if (router.segment_clear(pts[i - 1], na)
+                        and router.segment_clear(na, nb)
+                        and router.segment_clear(nb, pts[i + 2])):
+                    pts[i], pts[i + 1] = na, nb
+                    segs[g][2] = target
+
+    return [(edge, _simplify([tuple(p) for p in pts_by_edge[idx]]))
+            for idx, (edge, _) in enumerate(routes)]
 
 
 # ── line jumps (hop-overs at unavoidable crossings) ───────────────────────
@@ -808,7 +924,15 @@ def render_figure(laid: LaidFigure, total_sheets: int = 1) -> tuple[str, str]:
     for index in route_order:
         router.uncommit(index)
         routed[index] = _select_route(laid, laid.edges[index], index, router)
-    routes = [(edge, routed[index]) for index, edge in enumerate(laid.edges)]
+    # Straighten each final route: A* minimizes cost, not bends, so it leaves
+    # little staircases and near-parallel jogs. Collapse them to clean single
+    # bends (validated to never cross a box) before anything is drawn or text
+    # is planned against the geometry.
+    routes = [(edge, router.straighten(routed[index]))
+              for index, edge in enumerate(laid.edges)]
+    # Then merge near-parallel structural lanes so a shared spine reads as one
+    # bus with taps, not two lines 4 mm apart.
+    routes = _consolidate_lanes(routes, router)
     route_segments = [seg for _, pts in routes for seg in zip(pts, pts[1:])]
 
     # Plan hop-overs for the crossings the router could not avoid, BEFORE any
