@@ -171,6 +171,15 @@ class _GridRouter:
     def _anchor(self, node: LaidNode, side: str):
         left, top = node.x + self.ox, node.y + self.oy
         right, bottom = left + node.w, top + node.h
+        if node.shape == "diamond":
+            # A decision's lines meet it at its tips, never beside them: a point
+            # snapped along the box edge lies outside the diamond's outline.
+            return {
+                "left": (left, node.cy + self.oy),
+                "right": (right, node.cy + self.oy),
+                "up": (node.cx + self.ox, top),
+                "down": (node.cx + self.ox, bottom),
+            }[side]
         if side in ("left", "right"):
             y = min(max(self._snap(node.cy + self.oy, self.y0), top + 2.0),
                     bottom - 2.0)
@@ -186,7 +195,9 @@ class _GridRouter:
                 int((point[1] + direction[1] * reach - self.y0) // GRID))
 
     def route_edge(self, source: LaidNode, target: LaidNode,
-                   trunk: bool = False, edge_key=None):
+                   trunk: bool = False, edge_key=None,
+                   exit_side: Optional[str] = None,
+                   entry_side: Optional[str] = None):
         sx, sy = source.cx + self.ox, source.cy + self.oy
         tx, ty = target.cx + self.ox, target.cy + self.oy
         dx, dy = tx - sx, ty - sy
@@ -196,11 +207,30 @@ class _GridRouter:
             exits, entries = (h_exit, v_exit), (h_entry, v_entry)
         else:
             exits, entries = (v_exit, h_exit), (v_entry, h_entry)
+        all_sides = ("up", "down", "left", "right")
+
+        # A decision's branches each leave from their own tip, and a line into
+        # a decision arrives at its top tip (see _decision_ports): try those
+        # first, and fall back to the free choice only if no path exists.
+        if exit_side is not None or entry_side is not None:
+            forced_exits = (exit_side,) if exit_side else exits
+            forced_entries = (entry_side,) if entry_side else entries
+            best = self._try_anchor_pairs(source, target, forced_exits,
+                                          forced_entries, trunk)
+            if best is None and exit_side:
+                best = self._try_anchor_pairs(source, target, (exit_side,),
+                                              all_sides, trunk)
+            if best is None and entry_side:
+                best = self._try_anchor_pairs(source, target, all_sides,
+                                              (entry_side,), trunk)
+            if best is not None:
+                _, cells, points = best
+                self._commit(edge_key, cells, trunk)
+                return points
 
         best = self._try_anchor_pairs(source, target, exits, entries, trunk)
         if best is None:
             # widen the search to every side combination before giving up
-            all_sides = ("up", "down", "left", "right")
             best = self._try_anchor_pairs(source, target, all_sides,
                                           all_sides, trunk)
         if best is None:
@@ -280,6 +310,15 @@ class _GridRouter:
             for i in range(1, len(pts) - 2):
                 a, d = pts[i - 1], pts[i + 2]
                 for corner in ((a[0], d[1]), (d[0], a[1])):
+                    # A line leaves and meets a shape square to the side it
+                    # attaches to: a new corner may never turn the first or
+                    # last run (that would slide it along the outline).
+                    if i == 1 and (_heading(a, corner)
+                                   != _heading(pts[0], pts[1])):
+                        continue
+                    if i + 2 == len(pts) - 1 and (_heading(corner, d)
+                                                  != _heading(pts[-2], pts[-1])):
+                        continue
                     if (corner != pts[i]
                             and self.segment_clear(a, corner)
                             and self.segment_clear(corner, d)):
@@ -381,7 +420,64 @@ class _GridRouter:
         cells.reverse()
 
         points = [start_pt] + [self._center(c) for c in cells] + [goal_pt]
+        points = self._pin_tips(points, source, exit_side, target, entry_side)
         return (g, cells, _simplify(points))
+
+    def _pin_tips(self, points, source, exit_side, target, entry_side):
+        """A decision's tip is an exact point between grid lanes, so the first
+        straight run of cell centres sits up to half a cell beside it. Slide
+        that run sideways onto the tip (and the same at the arriving end), so
+        the line leaves the diamond exactly at its tip and stays square."""
+        pts = [list(p) for p in points]
+        if source.shape == "diamond":
+            self._pin_run(pts, exit_side, target, entry_side)
+        if target.shape == "diamond":
+            pts.reverse()
+            self._pin_run(pts, entry_side, source, exit_side)
+            pts.reverse()
+        return [tuple(p) for p in pts]
+
+    def _pin_run(self, pts, side, far_node, far_side) -> None:
+        perp = 0 if side in ("up", "down") else 1
+        along = 1 - perp
+        want, ref = pts[0][perp], pts[1][perp]
+        if abs(ref - want) < 1e-6:
+            return
+        last = len(pts) - 1
+        i = 1
+        while i < last and abs(pts[i][perp] - ref) < 1e-6:
+            pts[i][perp] = want
+            i += 1
+        if i < last:
+            return
+        a, b = pts[last - 1], pts[last]
+        if abs(a[0] - b[0]) < 1e-6 or abs(a[1] - b[1]) < 1e-6:
+            return
+        # The run reaches the far end and no longer lines up with it: slide the
+        # far attach point along its side when the side allows it...
+        if (far_node.shape != "diamond"
+                and (far_side in ("up", "down")) == (side in ("up", "down"))):
+            if perp == 0:
+                lo = far_node.x + self.ox + 2.0
+                hi = far_node.x + self.ox + far_node.w - 2.0
+            else:
+                lo = far_node.y + self.oy + 2.0
+                hi = far_node.y + self.oy + far_node.h - 2.0
+            if lo <= want <= hi:
+                b[perp] = want
+                return
+        # ...or step across in the middle of the run.
+        mid = (a[along] + b[along]) / 2.0
+        p1, p2 = [0.0, 0.0], [0.0, 0.0]
+        p1[along], p1[perp] = mid, a[perp]
+        p2[along], p2[perp] = mid, b[perp]
+        pts[last:last] = [p1, p2]
+
+
+def _heading(p, q) -> Tuple[int, int]:
+    def sign(v: float) -> int:
+        return 0 if abs(v) < 1e-6 else (1 if v > 0 else -1)
+    return (sign(q[0] - p[0]), sign(q[1] - p[1]))
 
 
 def _simplify(points: list) -> list:
@@ -506,14 +602,75 @@ def _crossings(points, laid: LaidFigure, edge, ox: float, oy: float) -> int:
     return score
 
 
+def _decision_ports(laid: LaidFigure):
+    """Hand every decision's lines their own tips before anything is routed.
+    A line arriving from above takes the top tip; the branch that carries on
+    straight down takes the bottom tip; every other branch takes the side tip
+    toward its target (else the bottom, the far side, the top). Two branches
+    never leave from one tip, and a line coming back in (a loop) takes a tip
+    no branch uses. Returns ({edge index: exit side}, {edge index: entry side})."""
+    exits: Dict[int, str] = {}
+    entries: Dict[int, str] = {}
+    for node in laid.nodes.values():
+        if node.shape != "diamond":
+            continue
+        free = ["down", "left", "right", "up"]
+        outs, loops_in = [], []
+        for index, edge in enumerate(laid.edges):
+            if edge.arrow == "none" or edge.source_id == edge.target_id:
+                continue
+            if edge.source_id == node.id:
+                outs.append(index)
+            elif edge.target_id == node.id:
+                if laid.nodes[edge.source_id].cy < node.cy - 1e-6:
+                    entries[index] = "up"
+                    if "up" in free:
+                        free.remove("up")
+                else:
+                    loops_in.append(index)
+
+        def toward(other: LaidNode) -> str:
+            return "right" if other.cx >= node.cx else "left"
+
+        def take(index: int, prefs, ports: Dict[int, str]) -> None:
+            for side in prefs:
+                if side in free:
+                    ports[index] = side
+                    free.remove(side)
+                    return
+
+        targets = {i: laid.nodes[laid.edges[i].target_id] for i in outs}
+        straight_on = [i for i in outs if targets[i].cy > node.cy
+                       and abs(targets[i].cx - node.cx) <= node.w / 2.0]
+        if straight_on:
+            take(min(straight_on, key=lambda i: (abs(targets[i].cx - node.cx), i)),
+                 ("down",), exits)
+        for i in sorted((i for i in outs if i not in exits),
+                        key=lambda i: (-abs(targets[i].cx - node.cx), i)):
+            near = toward(targets[i])
+            far = "left" if near == "right" else "right"
+            ahead = "down" if targets[i].cy > node.cy else "up"
+            behind = "up" if ahead == "down" else "down"
+            take(i, (near, ahead, far, behind), exits)
+        for i in loops_in:
+            near = toward(laid.nodes[laid.edges[i].source_id])
+            far = "left" if near == "right" else "right"
+            take(i, (near, "down", far, "up"), entries)
+    return exits, entries
+
+
 def _select_route(laid: LaidFigure, edge, index: int,
-                  router: Optional[_GridRouter] = None) -> list:
+                  router: Optional[_GridRouter] = None,
+                  ports=None) -> list:
     source = laid.nodes[edge.source_id]
     target = laid.nodes[edge.target_id]
     if router is not None:
+        exits, entries = ports or ({}, {})
         points = router.route_edge(source, target,
                                    trunk=(edge.arrow == "none"),
-                                   edge_key=index)
+                                   edge_key=index,
+                                   exit_side=exits.get(index),
+                                   entry_side=entries.get(index))
         if points is not None:
             return points
     candidates = _route_candidates(source, target, 0.0, 0.0,
@@ -900,6 +1057,58 @@ def _audit(figure_no: int, route_segments, text_rects, box_rects) -> List[str]:
     return violations
 
 
+def _tip_side(node: LaidNode, point) -> Optional[str]:
+    tips = {"left": (node.x, node.cy), "right": (node.x + node.w, node.cy),
+            "up": (node.cx, node.y), "down": (node.cx, node.y + node.h)}
+    for side, (x, y) in tips.items():
+        if abs(point[0] - x) < 0.05 and abs(point[1] - y) < 0.05:
+            return side
+    return None
+
+
+def _decision_audit(laid: LaidFigure, routes) -> List[str]:
+    """Every line at a decision starts or ends exactly on one of its tips and
+    leaves that tip square, and no two branches leave from the same tip."""
+    violations = []
+    out_tips: Dict[tuple, int] = {}
+    in_tips: set = set()
+    for edge, pts in routes:
+        if edge.arrow == "none" or len(pts) < 2:
+            continue
+        for node_id, end, nxt, leaving in (
+                (edge.source_id, pts[0], pts[1], True),
+                (edge.target_id, pts[-1], pts[-2], False)):
+            node = laid.nodes[node_id]
+            if node.shape != "diamond":
+                continue
+            name = node.numeral or node.label
+            side = _tip_side(node, end)
+            if side is None:
+                violations.append(
+                    f"FIG.{laid.number}: a line at decision '{name}' "
+                    f"is off its tips")
+                continue
+            if _heading(end, nxt) != _DIRS[side]:
+                violations.append(
+                    f"FIG.{laid.number}: a line at decision '{name}' does "
+                    f"not leave its {side} tip square")
+            if leaving:
+                out_tips[(node_id, side)] = out_tips.get((node_id, side), 0) + 1
+            else:
+                in_tips.add((node_id, side))
+    for (node_id, side), count in out_tips.items():
+        name = laid.nodes[node_id].numeral or laid.nodes[node_id].label
+        if count > 1:
+            violations.append(
+                f"FIG.{laid.number}: {count} branches of decision '{name}' "
+                f"share its {side} tip")
+        if (node_id, side) in in_tips:
+            violations.append(
+                f"FIG.{laid.number}: a branch of decision '{name}' leaves "
+                f"the {side} tip a line arrives at")
+    return violations
+
+
 # ── rendering ──────────────────────────────────────────────────────────────
 
 
@@ -916,14 +1125,17 @@ def render_figure(laid: LaidFigure, total_sheets: int = 1) -> tuple[str, str]:
         key=lambda i: (0 if laid.edges[i].arrow == "none" else 1, i),
     )
     routed: Dict[int, list] = {}
+    ports = _decision_ports(laid)
     for index in route_order:
-        routed[index] = _select_route(laid, laid.edges[index], index, router)
+        routed[index] = _select_route(laid, laid.edges[index], index, router,
+                                      ports)
     # Rip-up & re-route: each edge re-routes against the COMPLETE traffic
     # picture, fixing order asymmetry (early edges crossing late lines
     # they never saw). One refinement pass converges.
     for index in route_order:
         router.uncommit(index)
-        routed[index] = _select_route(laid, laid.edges[index], index, router)
+        routed[index] = _select_route(laid, laid.edges[index], index, router,
+                                      ports)
     # Straighten each final route: A* minimizes cost, not bends, so it leaves
     # little staircases and near-parallel jogs. Collapse them to clean single
     # bends (validated to never cross a box) before anything is drawn or text
@@ -1002,7 +1214,7 @@ def render_figure(laid: LaidFigure, total_sheets: int = 1) -> tuple[str, str]:
                   for nid, rect in zip(numeral_plans.keys(), numeral_rects)]
     text_rects += [(rect, text) for text, _, rect in label_plans]
     LAST_AUDIT = _audit(laid.number, avoid_segments, text_rects,
-                        node_obstacle_rects)
+                        node_obstacle_rects) + _decision_audit(laid, routes)
     for violation in LAST_AUDIT:
         print(f"[layout-audit] {violation}")
 
