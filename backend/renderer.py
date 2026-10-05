@@ -656,7 +656,30 @@ def _decision_ports(laid: LaidFigure):
             near = toward(laid.nodes[laid.edges[i].source_id])
             far = "left" if near == "right" else "right"
             take(i, (near, "down", far, "up"), entries)
+    _return_entries(laid, entries)
     return exits, entries
+
+
+def _return_entries(laid: LaidFigure, entries: Dict[int, str]) -> None:
+    """A line coming back UP into a box (a loop: "NO" returns to an earlier
+    step) would by default enter the box's bottom, which is exactly where the
+    box's own line leaves for the next step down: the two run on top of each
+    other. When the box already sends an arrowed line to a box below it, the
+    returning line takes the box's side instead, toward where it comes from.
+    A decision's own returns are handed out in _decision_ports."""
+    sends_down = {
+        edge.source_id for edge in laid.edges
+        if edge.arrow != "none" and edge.source_id != edge.target_id
+        and laid.nodes[edge.target_id].cy > laid.nodes[edge.source_id].cy + 1e-6
+    }
+    for index, edge in enumerate(laid.edges):
+        if index in entries or edge.arrow == "none" or edge.source_id == edge.target_id:
+            continue
+        source, target = laid.nodes[edge.source_id], laid.nodes[edge.target_id]
+        if target.shape == "diamond" or target.id not in sends_down:
+            continue
+        if source.cy > target.cy + 1e-6:
+            entries[index] = "right" if source.cx >= target.cx else "left"
 
 
 def _select_route(laid: LaidFigure, edge, index: int,
@@ -1109,6 +1132,32 @@ def _decision_audit(laid: LaidFigure, routes) -> List[str]:
     return violations
 
 
+def _crossover_audit(laid: LaidFigure, routes) -> List[str]:
+    """No line arrives at the very point another line leaves: on a box that
+    is one line drawn over another (the loop that came back into the bottom of
+    the step whose own arrow leaves from there)."""
+    violations = []
+    leaves: Dict[str, list] = {}
+    arrives: Dict[str, list] = {}
+    for edge, pts in routes:
+        if edge.arrow == "none" or len(pts) < 2:
+            continue
+        leaves.setdefault(edge.source_id, []).append(pts[0])
+        arrives.setdefault(edge.target_id, []).append(pts[-1])
+    for node_id, ends in arrives.items():
+        node = laid.nodes[node_id]
+        if node.shape == "diamond":
+            continue   # a decision's tips are checked in _decision_audit
+        for end in ends:
+            if any(abs(end[0] - s[0]) < 0.05 and abs(end[1] - s[1]) < 0.05
+                   for s in leaves.get(node_id, [])):
+                violations.append(
+                    f"FIG.{laid.number}: a line arrives at "
+                    f"'{node.numeral or node.label}' where another leaves")
+                break
+    return violations
+
+
 # ── rendering ──────────────────────────────────────────────────────────────
 
 
@@ -1214,7 +1263,8 @@ def render_figure(laid: LaidFigure, total_sheets: int = 1) -> tuple[str, str]:
                   for nid, rect in zip(numeral_plans.keys(), numeral_rects)]
     text_rects += [(rect, text) for text, _, rect in label_plans]
     LAST_AUDIT = _audit(laid.number, avoid_segments, text_rects,
-                        node_obstacle_rects) + _decision_audit(laid, routes)
+                        node_obstacle_rects) + _decision_audit(laid, routes) \
+        + _crossover_audit(laid, routes)
     for violation in LAST_AUDIT:
         print(f"[layout-audit] {violation}")
 
