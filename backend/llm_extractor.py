@@ -127,7 +127,15 @@ def draw_from_plan(
 
     figures.sort(key=lambda figure: figure.figure_number)
     stated = {row.ref for row in ledger}
-    return _harmonize(PatentGraph(figures=figures), stated)
+    # THE PLAN DECIDES IDENTITY (2026-10-07): a node whose words are a ledger
+    # feature is that feature and carries its numeral, whatever numeral its
+    # drafter cited. Two features whose words differ are never merged here.
+    planned = {
+        _identity_key(row.feature, ""): row.ref
+        for row in ledger
+        if row.feature.strip() and row.ref.strip()
+    }
+    return _harmonize(PatentGraph(figures=figures), stated, planned)
 
 
 # -- stage 1: planner ----------------------------------------------------------
@@ -288,7 +296,17 @@ def _tokens_related(a: str, b: str) -> bool:
     return bool(ta) and bool(tb) and (ta <= tb or tb <= ta)
 
 
-def _harmonize(graph: PatentGraph, stated: Set[str]) -> PatentGraph:
+def _harmonize(
+    graph: PatentGraph,
+    stated: Set[str],
+    planned: Optional[dict[str, str]] = None,
+) -> PatentGraph:
+    """`planned` (plan mode): each ledger feature's identity key -> its
+    numeral. A node whose words are a planned feature carries that numeral
+    and is never aliased into another element: on 2026-10-07 a drafter citing
+    a neighbour's numeral merged two planned features whose words differ
+    (Tim's 402 and 502), and the drawing contradicted the text."""
+    planned = planned or {}
     canon_shape: dict[str, str] = {}
     canon_fields: dict[str, List[str]] = {}
     canon_num: dict[str, str] = {}
@@ -301,18 +319,30 @@ def _harmonize(graph: PatentGraph, stated: Set[str]) -> PatentGraph:
             key = alias[key]
         return key
 
+    # Sweep 0 (plan mode): every planned feature drawn on the sheets holds
+    # its own numeral first, so no drafter's citation can take it from it.
+    for figure in graph.figures:
+        for node in figure.nodes:
+            key = _identity_key(node.label, node.id)
+            numeral = planned.get(key, "")
+            if numeral and numeral in stated and key not in canon_num and numeral not in used:
+                canon_num[key] = numeral
+                numeral_owner[numeral] = key
+                used.add(numeral)
+
     # Sweep A: bind stated numerals and detect label-variant aliases.
     # Two drafters naming one element "ORCHESTRATOR" and "ORCHESTRATOR
     # AGENT" while citing the SAME stated numeral are the same element.
     for figure in graph.figures:
         for node in figure.nodes:
             key = resolve(_identity_key(node.label, node.id))
-            numeral = (node.reference_numeral or "").strip()
+            numeral = (planned.get(key) or node.reference_numeral or "").strip()
             if not numeral or numeral not in stated:
                 continue
             if numeral in used:
                 owner = numeral_owner[numeral]
-                if owner != key and _tokens_related(owner, key):
+                # A planned feature is never another element's variant wording.
+                if owner != key and key not in planned and _tokens_related(owner, key):
                     alias[key] = owner
                 continue
             if key not in canon_num:
