@@ -13,7 +13,13 @@
                     <SPECIFICATION>
 [SPECIFICATION_TEXT]
                     </SPECIFICATION>
+                    <PREVIOUS_SHEET>
+[PREVIOUS_SHEET_JSON]
+                    </PREVIOUS_SHEET>
                 </FUEL>
+                <!-- PREVIOUS_SHEET (2026-10-24, S4): empty on a first draw. On a redraw it is this figure as you last drew it
+                     (its nodes and edges). Keep every node and edge of it, with its id, label and numeral, and change only
+                     what the last sentences of the assignment's outline ask. Never redraw the sheet from the outline alone. -->
 
                 <THE_MACHINE>
                     <ROLE>

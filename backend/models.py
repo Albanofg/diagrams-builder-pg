@@ -133,6 +133,29 @@ class GenerateResponse(BaseModel):
 # fields the caller carries for its own document (briefDescription, etc.).
 
 
+class PlanNode(BaseModel):
+    """One box of a flowchart the caller planned (2026-10-24, S2)."""
+    id: str
+    label: str
+    numeral: Optional[str] = None
+    kind: Literal["start", "end", "connector", "decision", "process"] = "process"
+
+
+class PlanEdge(BaseModel):
+    """One line of a flowchart the caller planned: its two boxes by id, and its answer."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str
+    label: Optional[str] = None
+
+
+class PlanFlow(BaseModel):
+    """A flowchart as the caller planned it, drawn as given: no drafter call (2026-10-24, S2)."""
+    nodes: List[PlanNode] = Field(default_factory=list)
+    edges: List[PlanEdge] = Field(default_factory=list)
+
+
 class PlanFigure(BaseModel):
     """One ready FIGURE_ASSIGNMENT from the caller's planner."""
     figNumber: int
@@ -140,6 +163,11 @@ class PlanFigure(BaseModel):
     title: str
     outline: str
     numerals: List[str] = Field(default_factory=list)
+    # 2026-10-24 (S2): a flowchart's every box and line, when the caller planned them.
+    flow: Optional[PlanFlow] = None
+    # 2026-10-24 (S4): on a redraw with a note, the sheet as it was last drawn (its
+    # DrawnFigure.graph), so only what the note names changes.
+    previous: Optional[dict] = None
 
 
 class DrawPlan(BaseModel):
@@ -159,6 +187,9 @@ class DrawnFigure(BaseModel):
     svgData: str
     pdfBase64: str
     numerals: List[str] = Field(default_factory=list)  # numerals ACTUALLY drawn
+    # 2026-10-24 (S4): the sheet's nodes and edges as drafted, for the caller to send
+    # back with a redraw's note.
+    graph: Optional[dict] = None
 
 
 class DrawResponse(BaseModel):

@@ -17,11 +17,11 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from models import (
-    DraftFigure, Edge, Figure, FigurePlan, LedgerEntry, Node, PatentGraph,
-    PlannedFigure,
+    DraftEdge, DraftFigure, DraftNode, Edge, Figure, FigurePlan, LedgerEntry,
+    Node, PatentGraph, PlannedFigure,
 )
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4").strip()
@@ -93,27 +93,49 @@ def draw_from_plan(
     planned: List[PlannedFigure],
     ledger: List[LedgerEntry],
     spec: str = "",
+    flows: Optional[dict] = None,
+    allowed: Optional[Dict[int, Set[str]]] = None,
+    previous: Optional[Dict[int, dict]] = None,
+    drafts_out: Optional[dict] = None,
 ) -> PatentGraph:
     """Plan mode entry point. The caller already ran the planner, so we SKIP it
     and run only drafter -> convert -> harmonize on the supplied plan.
 
     THE LEDGER IS LAW: every ledger numeral is bound as `stated` so _harmonize
     preserves the caller's numerals instead of reissuing a fresh 100,102,...
-    sequence. Mirrors extract_graph()'s tail, minus _run_planner."""
+    sequence. Mirrors extract_graph()'s tail, minus _run_planner.
+
+    2026-10-24 (S2): a flowchart in `flows` (figNumber -> the caller's PlanFlow)
+    is drawn as the caller planned it, every box and every line, and its drafter
+    call is skipped: on the caller's 22 graded briefs, 15 of 57 blockers were a
+    drawing against the text, and the drafter rebuilt every line from the
+    outline's words. (S1): `allowed` (figNumber -> that sheet's planned
+    numerals) keeps each sheet to its own plan's numerals. (S4): `previous`
+    (figNumber -> the sheet as last drawn) goes to that sheet's drafter on a
+    redraw, so only what the note names changes; `drafts_out`, when given,
+    receives each sheet's draft, for the caller to send back next time."""
     planned = planned[:MAX_FIGURES]
     ledger_json = FigurePlan(figures=[], numerals=ledger).model_dump_json(
         include={"numerals"}
     )
+    flows = flows or {}
+    previous = previous or {}
+
+    def draft_of(figure: PlannedFigure) -> Optional[DraftFigure]:
+        flow = flows.get(figure.figNumber)
+        if flow is not None and figure.figType in FLOW_LIKE:
+            return _draft_from_flow(figure, flow)
+        return _run_drafter(figure, ledger_json, spec, previous.get(figure.figNumber))
 
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DRAFTERS) as pool:
-        drafts = list(pool.map(
-            lambda figure: _run_drafter(figure, ledger_json, spec), planned,
-        ))
+        drafts = list(pool.map(draft_of, planned))
 
     figures: List[Figure] = []
     for planned_figure, draft in zip(planned, drafts):
         if draft is None:
             continue  # a drafter call failed — skip that figure, keep the rest
+        if drafts_out is not None:
+            drafts_out[planned_figure.figNumber] = draft.model_dump(by_alias=True)
         figure = _convert_figure(draft)
         if not figure.nodes:
             continue
@@ -135,7 +157,52 @@ def draw_from_plan(
         for row in ledger
         if row.feature.strip() and row.ref.strip()
     }
-    return _harmonize(PatentGraph(figures=figures), stated, planned)
+    return _harmonize(PatentGraph(figures=figures), stated, planned, allowed)
+
+
+# 2026-10-24 (S2): the caller's flowchart box kinds -> the drafter's node types.
+FLOW_KIND = {
+    "start": "terminator",
+    "end": "terminator",
+    "connector": "onpage-connector",
+    "decision": "decision",
+    "process": "process",
+}
+
+
+def _draft_from_flow(figure: PlannedFigure, flow) -> Optional[DraftFigure]:
+    """A flowchart drawn as the caller planned it (S2): every box by its label and
+    numeral, every line with its answer. No model call; a flow with a line to an
+    unknown box is drawn without that line, never invented."""
+    ids = {node.id for node in flow.nodes}
+    nodes = [
+        DraftNode(
+            id=node.id,
+            type=FLOW_KIND.get(node.kind, "process"),
+            label=node.label,
+            ref=(node.numeral or "").strip(),
+        )
+        for node in flow.nodes
+    ]
+    edges = [
+        DraftEdge(
+            **{"from": edge.from_},
+            to=edge.to,
+            kind="branch" if (edge.label or "").strip() else "control",
+            label=(edge.label or "").strip() or None,
+        )
+        for edge in flow.edges
+        if edge.from_ in ids and edge.to in ids
+    ]
+    if not nodes:
+        return None
+    return DraftFigure(
+        figNumber=figure.figNumber,
+        figType=figure.figType,
+        title=figure.title,
+        nodes=nodes,
+        edges=edges,
+    )
 
 
 # -- stage 1: planner ----------------------------------------------------------
@@ -172,23 +239,32 @@ def _run_planner(text: str) -> FigurePlan:
 
 
 def _run_drafter(figure: PlannedFigure, ledger_json: str,
-                 text: str) -> Optional[DraftFigure]:
+                 text: str, previous: Optional[dict] = None) -> Optional[DraftFigure]:
     from openai import APIError
+    import json
 
     prompt = (
         _load_prompt("drafter.leap.md")
         .replace("[FIGURE_PLAN_JSON]", figure.model_dump_json())
         .replace("[NUMERAL_LEDGER_JSON]", ledger_json)
         .replace("[SPECIFICATION_TEXT]", text)
+        # 2026-10-24 (S4): empty on a first draw; the sheet as last drawn on a redraw.
+        .replace("[PREVIOUS_SHEET_JSON]", json.dumps(previous) if previous else "")
     )
-    try:
-        response = _client().responses.parse(
-            model=OPENAI_MODEL, input=prompt, text_format=DraftFigure,
-        )
-        return response.output_parsed
-    except APIError as exc:
-        print(f"DRAFTER FAILED (figure skipped): {exc}", flush=True)
-        return None  # degrade gracefully: skip this figure, keep the rest
+    # 2026-10-24 (S3): a drafter call that fails is tried once more before its
+    # sheet is dropped; the rest of the set never waits on it twice.
+    for attempt in (1, 2):
+        try:
+            response = _client().responses.parse(
+                model=OPENAI_MODEL, input=prompt, text_format=DraftFigure,
+            )
+            return response.output_parsed
+        except APIError as exc:
+            if attempt == 1:
+                print(f"DRAFTER FAILED (trying once more): {exc}", flush=True)
+                continue
+            print(f"DRAFTER FAILED (figure skipped): {exc}", flush=True)
+    return None  # degrade gracefully: skip this figure, keep the rest
 
 
 # -- conversion: DraftFigure -> renderable Figure ------------------------------
@@ -300,13 +376,23 @@ def _harmonize(
     graph: PatentGraph,
     stated: Set[str],
     planned: Optional[dict[str, str]] = None,
+    allowed: Optional[Dict[int, Set[str]]] = None,
 ) -> PatentGraph:
     """`planned` (plan mode): each ledger feature's identity key -> its
     numeral. A node whose words are a planned feature carries that numeral
     and is never aliased into another element: on 2026-10-07 a drafter citing
     a neighbour's numeral merged two planned features whose words differ
-    (Tim's 402 and 502), and the drawing contradicted the text."""
+    (Tim's 402 and 502), and the drawing contradicted the text.
+
+    `allowed` (plan mode, 2026-10-24, S1): each sheet's own planned numerals.
+    A sheet carries none but those: a numeral a box cites from elsewhere in the
+    ledger is dropped there, and a box no planned feature names gets none,
+    never a fresh 100, 102, ... (the caller's 10-23 FIG. 1 kept the System
+    Environment's 100 on its HOUSEHOLD LEDGER box)."""
     planned = planned or {}
+
+    def on_sheet(figure: Figure, numeral: str) -> bool:
+        return allowed is None or numeral in allowed.get(figure.figure_number, set())
     canon_shape: dict[str, str] = {}
     canon_fields: dict[str, List[str]] = {}
     canon_num: dict[str, str] = {}
@@ -325,7 +411,7 @@ def _harmonize(
         for node in figure.nodes:
             key = _identity_key(node.label, node.id)
             numeral = planned.get(key, "")
-            if numeral and numeral in stated and key not in canon_num and numeral not in used:
+            if numeral and numeral in stated and on_sheet(figure, numeral) and key not in canon_num and numeral not in used:
                 canon_num[key] = numeral
                 numeral_owner[numeral] = key
                 used.add(numeral)
@@ -337,7 +423,7 @@ def _harmonize(
         for node in figure.nodes:
             key = resolve(_identity_key(node.label, node.id))
             numeral = (planned.get(key) or node.reference_numeral or "").strip()
-            if not numeral or numeral not in stated:
+            if not numeral or numeral not in stated or not on_sheet(figure, numeral):
                 continue
             if numeral in used:
                 owner = numeral_owner[numeral]
@@ -379,8 +465,13 @@ def _harmonize(
                 node.reference_numeral = None
                 continue
             if key not in canon_num:
+                if allowed is not None:
+                    # S1: a box no planned feature names carries no numeral.
+                    node.reference_numeral = None
+                    continue
                 canon_num[key] = next_numeral()
-            node.reference_numeral = canon_num[key]
+            numeral = canon_num[key]
+            node.reference_numeral = numeral if on_sheet(figure, numeral) else None
     return graph
 
 

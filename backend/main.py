@@ -146,9 +146,22 @@ def draw(
     if not planned:
         raise HTTPException(status_code=400, detail="plan.figures is empty.")
 
+    # 2026-10-24 (S2): a flowchart the caller planned box by box is drawn as given.
+    # (S1): each sheet carries only the numerals its own plan gives it.
+    flows = {
+        f.figNumber: f.flow
+        for f in request.plan.figures
+        if f.flow and f.flow.nodes and f.flow.edges
+    }
+    allowed = {f.figNumber: set(f.numerals) for f in request.plan.figures}
+    # (S4): a redraw with a note keeps the sheet as last drawn; each sheet's draft
+    # comes back with it for the next one.
+    previous = {f.figNumber: f.previous for f in request.plan.figures if f.previous}
+    drafts: dict = {}
     try:
         graph = draw_from_plan(
-            planned, request.plan.numerals, (request.spec or "").strip()
+            planned, request.plan.numerals, (request.spec or "").strip(),
+            flows=flows, allowed=allowed, previous=previous, drafts_out=drafts,
         )
     except ExtractionError as exc:
         print(f"DRAW FAILED: {exc}", flush=True)
@@ -167,5 +180,6 @@ def draw(
             svgData=svg,
             pdfBase64=pdf,
             numerals=drawn,
+            graph=drafts.get(figure.figure_number),
         ))
     return DrawResponse(figures=figures)
