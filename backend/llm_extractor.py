@@ -157,7 +157,15 @@ def draw_from_plan(
         for row in ledger
         if row.feature.strip() and row.ref.strip()
     }
-    return _harmonize(PatentGraph(figures=figures), stated, planned, allowed)
+    # 2026-10-28 (the caller's plan 0037): every numeral the ledger gives a
+    # name, in order. The map above keeps only the last, so a name planned as
+    # 108 on FIG. 1 and 308 on FIG. 3 kept 308, which FIG. 1 does not allow,
+    # and its box was drawn with no numeral on every redraw.
+    planned_all: dict[str, List[str]] = {}
+    for row in ledger:
+        if row.feature.strip() and row.ref.strip():
+            planned_all.setdefault(_identity_key(row.feature, ""), []).append(row.ref.strip())
+    return _harmonize(PatentGraph(figures=figures), stated, planned, allowed, planned_all)
 
 
 # 2026-10-24 (S2): the caller's flowchart box kinds -> the drafter's node types.
@@ -377,6 +385,7 @@ def _harmonize(
     stated: Set[str],
     planned: Optional[dict[str, str]] = None,
     allowed: Optional[Dict[int, Set[str]]] = None,
+    planned_all: Optional[dict[str, List[str]]] = None,
 ) -> PatentGraph:
     """`planned` (plan mode): each ledger feature's identity key -> its
     numeral. A node whose words are a planned feature carries that numeral
@@ -388,11 +397,23 @@ def _harmonize(
     A sheet carries none but those: a numeral a box cites from elsewhere in the
     ledger is dropped there, and a box no planned feature names gets none,
     never a fresh 100, 102, ... (the caller's 10-23 FIG. 1 kept the System
-    Environment's 100 on its HOUSEHOLD LEDGER box)."""
+    Environment's 100 on its HOUSEHOLD LEDGER box).
+
+    `planned_all` (plan mode, 2026-10-28): every numeral the ledger gives each
+    name. A name the plan numbers once per sheet (108 on FIG. 1, 308 on FIG. 3)
+    takes, on each sheet, the numeral planned for that sheet."""
     planned = planned or {}
+    planned_all = planned_all or {}
 
     def on_sheet(figure: Figure, numeral: str) -> bool:
         return allowed is None or numeral in allowed.get(figure.figure_number, set())
+
+    def planned_here(figure: Figure, key: str) -> str:
+        """The numeral the plan gives this name on this sheet, when it gives it more than one."""
+        refs = planned_all.get(key, [])
+        if allowed is None or len(set(refs)) < 2:
+            return ""
+        return next((ref for ref in refs if on_sheet(figure, ref)), "")
     canon_shape: dict[str, str] = {}
     canon_fields: dict[str, List[str]] = {}
     canon_num: dict[str, str] = {}
@@ -463,6 +484,10 @@ def _harmonize(
             node.fields = canon_fields.get(key, node.fields)
             if node.shape in ("initial", "final"):
                 node.reference_numeral = None
+                continue
+            here = planned_here(figure, key)
+            if here:
+                node.reference_numeral = here
                 continue
             if key not in canon_num:
                 if allowed is not None:

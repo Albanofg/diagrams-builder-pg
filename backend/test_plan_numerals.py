@@ -60,6 +60,18 @@ def main() -> int:
     unplanned = numerals(_harmonize(graph((4, [("FLAG STORE", "402")]), (5, [("FLAG STORE CLIENT", "402")])), stated))
     assert unplanned[(5, "FLAG STORE CLIENT")] == "402", "without a plan the harmonizer reads as it did"
 
+    # 2026-10-28 (the caller's plan 0037): one name planned as 108 on FIG. 1 and 308 on FIG. 3. The name's map kept only
+    # 308, which FIG. 1 does not allow, so FIG. 1's box was drawn bare on every redraw.
+    twice = [("selector index", "108"), ("selector index", "308")]
+    all_refs = {}
+    for feature, ref in twice:
+        all_refs.setdefault(_identity_key(feature, ""), []).append(ref)
+    sheets = {1: {"108"}, 3: {"308"}}
+    per_sheet = numerals(_harmonize(graph((1, [("SELECTOR INDEX", "108")]), (3, [("SELECTOR INDEX", "308")])), {"108", "308"}, planned_of(twice), sheets, all_refs))
+    assert (per_sheet[(1, "SELECTOR INDEX")], per_sheet[(3, "SELECTOR INDEX")]) == ("108", "308"), "a name planned once per sheet takes each sheet's own numeral"
+    alone = numerals(_harmonize(graph((1, [("SELECTOR INDEX", "108")])), {"108", "308"}, planned_of(twice), {1: {"108"}}, all_refs))
+    assert alone[(1, "SELECTOR INDEX")] == "108", "...a redraw of that one sheet included"
+
     print("All plan-numeral assertions passed.")
     return 0
 
