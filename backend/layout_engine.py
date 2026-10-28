@@ -121,6 +121,18 @@ ENTITY_TITLE_H = 8.0
 ENTITY_ROW_H = 5.5
 
 
+def _keep_short_tail(lines: list[str], chars_per_line: int) -> list[str]:
+    """A short last line ("12", "N") takes the word before it down, so "at step 12" never leaves "12" alone in a box,
+    where a reader and the caller's sheet reader take it for a reference numeral (2026-10-27, the caller's plan 0033
+    Part 5; Tim's FIG. 10, 18, 19 and 29). Only when the two still fit on one line; box sizes and the font stay."""
+    if len(lines) < 2 or len(lines[-1]) > 3:
+        return lines
+    head, _, word = lines[-2].rpartition(" ")
+    if not head or len(word) + 1 + len(lines[-1]) > chars_per_line:
+        return lines
+    return [*lines[:-2], head, f"{word} {lines[-1]}"]
+
+
 def _size_node(node) -> LaidNode:
     if node.shape in ("initial", "final"):
         return LaidNode(id=node.id, label="", lines=[], numeral="",
@@ -140,7 +152,7 @@ def _size_node(node) -> LaidNode:
     natural = len(label) * CHAR_WIDTH + 10.0
     width = max(MIN_WIDTH, min(MAX_WIDTH, natural))
     chars_per_line = max(8, int((width - 8.0) / CHAR_WIDTH))
-    lines = textwrap.wrap(label, chars_per_line) or [label]
+    lines = _keep_short_tail(textwrap.wrap(label, chars_per_line) or [label], chars_per_line)
     height = NODE_HEIGHT + (len(lines) - 1) * LINE_HEIGHT
     if node.shape == "diamond":
         width += 14.0     # diamonds need slack: text sits in the inscribed box

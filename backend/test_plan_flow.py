@@ -177,6 +177,14 @@ check("S4: each drawn sheet's draft comes back, by its number, for the caller to
       ([4], ["Start", "resolve option citations"], True))
 llm_extractor._run_drafter = original_drafter
 
+# S5 (2026-10-27, the caller's plan 0033 Part 5): a step number is never left alone on a box's last line.
+from layout_engine import _keep_short_tail  # noqa: E402
+
+check("S5: a short last line takes the word before it down, only when both fit; anything else stays as wrapped",
+      (_keep_short_tail(["record the failure at step", "12"], 20), _keep_short_tail(["record the failure", "at step 12"], 20),
+       _keep_short_tail(["record the failure at", "unrecoverableness", "12"], 12), _keep_short_tail(["12"], 20)),
+      (["record the failure at", "step 12"], ["record the failure", "at step 12"], ["record the failure at", "unrecoverableness", "12"], ["12"]))
+
 if failures:
     print(f"\n{failures} check(s) failed")
     sys.exit(1)
