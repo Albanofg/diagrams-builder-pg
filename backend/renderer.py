@@ -123,7 +123,8 @@ class _GridRouter:
         self.soft: dict = {}
         self.used: dict = {}
         self.used_axis: dict = {}   # cell -> {'h': count, 'v': count}
-        self.trunk_used: dict = {}  # cells carrying structural bus lanes
+        # cells carrying structural bus lanes -> the two boxes each line on it joins
+        self.trunk_used: dict = {}
         self.committed: dict = {}   # edge key -> (cells, axis pairs, cost)
         for node in laid.nodes.values():
             left, top = node.x + ox, node.y + oy
@@ -225,7 +226,7 @@ class _GridRouter:
                                               (entry_side,), trunk)
             if best is not None:
                 _, cells, points = best
-                self._commit(edge_key, cells, trunk)
+                self._commit(edge_key, cells, trunk, _ends(source, target))
                 return points
 
         best = self._try_anchor_pairs(source, target, exits, entries, trunk)
@@ -236,17 +237,17 @@ class _GridRouter:
         if best is None:
             return None
         _, cells, points = best
-        self._commit(edge_key, cells, trunk)
+        self._commit(edge_key, cells, trunk, _ends(source, target))
         return points
 
-    def _commit(self, edge_key, cells, trunk: bool) -> None:
+    def _commit(self, edge_key, cells, trunk: bool, ends=frozenset()) -> None:
         commit = TRUNK_COST if trunk else USED_COST
         axis_pairs = []
         prev = None
         for cell in cells:
             self.used[cell] = self.used.get(cell, 0) + commit
             if trunk:
-                self.trunk_used[cell] = self.trunk_used.get(cell, 0) + 1
+                self.trunk_used.setdefault(cell, []).append(ends)
             if prev is not None:
                 axis = "h" if cell[1] == prev[1] else "v"
                 for c in (prev, cell):
@@ -256,14 +257,14 @@ class _GridRouter:
             prev = cell
         if edge_key is not None:
             self.committed[edge_key] = (list(cells), axis_pairs, commit,
-                                        trunk)
+                                        trunk, ends)
 
     def uncommit(self, edge_key) -> None:
         """Rip up a routed edge so it can be re-routed against full traffic."""
         entry = self.committed.pop(edge_key, None)
         if entry is None:
             return
-        cells, axis_pairs, commit, trunk = entry
+        cells, axis_pairs, commit, trunk, ends = entry
         for cell in cells:
             remaining = self.used.get(cell, 0) - commit
             if remaining > 0:
@@ -271,10 +272,10 @@ class _GridRouter:
             else:
                 self.used.pop(cell, None)
             if trunk:
-                count = self.trunk_used.get(cell, 0) - 1
-                if count > 0:
-                    self.trunk_used[cell] = count
-                else:
+                lanes = self.trunk_used.get(cell, [])
+                if ends in lanes:
+                    lanes.remove(ends)
+                if not lanes:
                     self.trunk_used.pop(cell, None)
         for cell, axis in axis_pairs:
             counts = self.used_axis.get(cell)
@@ -358,6 +359,7 @@ class _GridRouter:
                       else (goal_pt[0], start_pt[1]))
             return (2, [start], [start_pt, corner, goal_pt])
 
+        ends = _ends(source, target)
         start_dir = _DIRS[exit_side]
         heap = [(0, 0, 0, start, start_dir)]
         best_cost = {(start, start_dir): 0}
@@ -387,9 +389,18 @@ class _GridRouter:
                 # merge into ONE visible spine with taps instead of a bundle
                 # of parallel tracks. Crossing a perpendicular line stays
                 # expensive for everyone: detour when possible.
+                # 2026-10-29: only a lane whose lines all meet one box this
+                # line also meets is its spine. Two records lines with no
+                # record in common on one lane read as joining records they
+                # do not join, so such a lane is kept off like a used one.
                 if trunk:
-                    traffic = 0
-                    step = 1 if nxt in self.trunk_used else 2
+                    lanes = self.trunk_used.get(nxt)
+                    if not lanes:
+                        traffic, step = 0, 2
+                    elif frozenset.intersection(*lanes) & ends:
+                        traffic, step = 0, 1
+                    else:
+                        traffic, step = USED_COST * len(lanes), 2
                 else:
                     traffic = self.used.get(nxt, 0)
                     step = 1
@@ -472,6 +483,11 @@ class _GridRouter:
         p1[along], p1[perp] = mid, a[perp]
         p2[along], p2[perp] = mid, b[perp]
         pts[last:last] = [p1, p2]
+
+
+def _ends(source, target) -> frozenset:
+    """The two boxes a line joins, by id."""
+    return frozenset((source.id, target.id))
 
 
 def _heading(p, q) -> Tuple[int, int]:
@@ -730,17 +746,24 @@ def _consolidate_lanes(routes, router, merge_dist: float = MERGE_DIST):
                     segs.append([idx, i, a[con],
                                  min(a[span], b[span]), max(a[span], b[span])])
 
+        def ends(s):
+            edge = routes[segs[s][0]][0]
+            return frozenset((edge.source_id, edge.target_id))
+
         used = [False] * len(segs)
         for s in range(len(segs)):
             if used[s]:
                 continue
             group = [s]
             used[s] = True
+            # 2026-10-29: one lane carries only lines that all meet one box
+            # (the bus, a record's own relations), never lines of strangers.
+            hub = ends(s)
             changed = True
             while changed:                              # grow the lane cluster
                 changed = False
                 for t in range(len(segs)):
-                    if used[t]:
+                    if used[t] or not (hub & ends(t)):
                         continue
                     # Same lane band, and spans overlap OR meet at a shared
                     # junction (within a cell) — so a bus and a stub peeling the
@@ -751,6 +774,7 @@ def _consolidate_lanes(routes, router, merge_dist: float = MERGE_DIST):
                            for g in group):
                         group.append(t)
                         used[t] = True
+                        hub = hub & ends(t)
                         changed = True
             if len(group) < 2:
                 continue

@@ -231,6 +231,72 @@ check("B1: a records sheet with no line is drawn, each record with its fields",
 for f in graph_b1.figures:
     render_figure(layout_figure(f))
 check("B1: both lay out and render", sorted(by_fig), [1, 3])
+
+# -- B2 (2026-10-29): a lane carries only lines that meet one box ------------------
+# The caller's default proof run's records sheet, given as data: drawn by the old router, CURRENT
+# PROVENANCE to VERIFICATION OUTCOME ran 40 mm on the lane of CURRENT DRAFT's own lines, so the
+# sheet read as the provenance joining the refutation and resolution records.
+fan = PlanFlow.model_validate({
+    "nodes": [
+        {"id": "r1", "label": "CURRENT DRAFT", "numeral": "202", "kind": "entity", "fields": ["draft_id", "question_text", "answer_options", "intended key"]},
+        {"id": "r2", "label": "CURRENT PROVENANCE", "numeral": "204", "kind": "entity", "fields": ["provenance_id", "item_id", "corpus_revision", "grammar_cell_id", "item_grammar_version", "style_band", "rerender_budget", "source_provenance_id"]},
+        {"id": "r3", "label": "CITATION RESULTS", "numeral": "206", "kind": "entity", "fields": ["item_id", "corpus_revision", "resolutions"]},
+        {"id": "r4", "label": "REFUTATION RESULTS", "numeral": "208", "kind": "entity", "fields": ["item_id", "corpus_revision", "records", "run_policy"]},
+        {"id": "r5", "label": "RESOLUTION RESULT", "numeral": "210", "kind": "entity", "fields": ["draft_id", "corpus_revision", "relied_on_passages"]},
+        {"id": "r6", "label": "VERIFICATION OUTCOME", "numeral": "212", "kind": "entity", "fields": ["outcome_id", "item_id", "provenance_id", "corpus_revision", "applied_agreement_rule_id", "provenance_check", "citation_check", "blind_agreement_check", "style_check", "wrong_option_refutation_check", "status", "withholding_reasons", "identified_unrefuted_option"]},
+        {"id": "r7", "label": "ITEM RELEASE", "numeral": "214", "kind": "entity", "fields": ["release_id", "item_id", "provenance_id", "verification_outcome_id"]},
+    ],
+    "edges": [
+        {"from": "r1", "to": "r2", "label": "1:1", "kind": "data"},
+        {"from": "r1", "to": "r3", "label": "1:1", "kind": "data"},
+        {"from": "r1", "to": "r4", "label": "1:1", "kind": "data"},
+        {"from": "r1", "to": "r5", "label": "1:1", "kind": "data"},
+        {"from": "r2", "to": "r6", "label": "1:N", "kind": "data"},
+        {"from": "r6", "to": "r7", "label": "1:1", "kind": "data"},
+    ],
+})
+fan_numerals = ["202", "204", "206", "208", "210", "212", "214"]
+graph_b2 = draw_from_plan(
+    [PlannedFigure(figNumber=2, figType="record", title="The records", outline="", numerals=fan_numerals)],
+    [LedgerEntry(ref=r, feature=n["label"]) for r, n in zip(fan_numerals, fan.model_dump()["nodes"])],
+    "", flows={2: fan}, allowed={2: set(fan_numerals)},
+)
+lanes_b2 = {}
+original_consolidate = renderer._consolidate_lanes
+
+
+def keep_routes(routes, router, *args, **kwargs):
+    lanes_b2["routes"] = original_consolidate(routes, router, *args, **kwargs)
+    return lanes_b2["routes"]
+
+
+renderer._consolidate_lanes = keep_routes
+render_figure(layout_figure(graph_b2.figures[0]))
+renderer._consolidate_lanes = original_consolidate
+
+
+def runs(points):
+    out = []
+    for p, q in zip(points, points[1:]):
+        if abs(p[1] - q[1]) < 1e-6 and abs(p[0] - q[0]) > 1e-6:
+            out.append(("h", round(p[1], 3), min(p[0], q[0]), max(p[0], q[0])))
+        elif abs(p[0] - q[0]) < 1e-6 and abs(p[1] - q[1]) > 1e-6:
+            out.append(("v", round(p[0], 3), min(p[1], q[1]), max(p[1], q[1])))
+    return out
+
+
+shared_b2 = 0.0
+routes_b2 = lanes_b2["routes"]
+for i, (ei, pi) in enumerate(routes_b2):
+    for ej, pj in routes_b2[i + 1:]:
+        if {ei.source_id, ei.target_id} & {ej.source_id, ej.target_id}:
+            continue
+        for a in runs(pi):
+            for b in runs(pj):
+                if a[:2] == b[:2]:
+                    shared_b2 += max(0.0, min(a[3], b[3]) - max(a[2], b[2]))
+check("B2: no two lines that meet no box in common run on one lane", round(shared_b2, 1), 0.0)
+check("B2: the drafter's 6 lines are all drawn", len(routes_b2), 6)
 llm_extractor._run_drafter = original_drafter
 
 if failures:
