@@ -185,6 +185,54 @@ check("S5: a short last line takes the word before it down, only when both fit; 
        _keep_short_tail(["record the failure at", "unrecoverableness", "12"], 12), _keep_short_tail(["12"], 20)),
       (["record the failure at", "step 12"], ["record the failure", "at step 12"], ["record the failure at", "unrecoverableness", "12"], ["12"]))
 
+# B1 (2026-10-28, the caller's plan 0038): a sheet of any kind given as a graph is drawn as given,
+# with no drafter call: a system sheet's components, store and outside source with the records
+# that pass between them, and a records sheet's records with their fields and no line at all.
+calls.clear()
+llm_extractor._run_drafter = no_drafter
+system = PlanFlow.model_validate({
+    "nodes": [
+        {"id": "c1", "label": "Citation Resolver", "numeral": "102", "kind": "component"},
+        {"id": "c2", "label": "Release Step", "numeral": "104", "kind": "component"},
+        {"id": "d1", "label": "Item Release", "numeral": "106", "kind": "datastore"},
+        {"id": "x1", "label": "Normative Corpus", "numeral": "108", "kind": "external"},
+    ],
+    "edges": [
+        {"from": "x1", "to": "c1", "label": "authority passages", "kind": "data"},
+        {"from": "c1", "to": "c2", "label": "citation results", "kind": "data"},
+        {"from": "c2", "to": "d1", "label": "release", "kind": "data"},
+    ],
+})
+records = PlanFlow.model_validate({
+    "nodes": [
+        {"id": "r1", "label": "Draft", "numeral": "302", "kind": "entity", "fields": ["draft_id", "options"]},
+        {"id": "r2", "label": "Item Provenance", "numeral": "304", "kind": "entity", "fields": ["cell", "grammar_version"]},
+    ],
+    "edges": [],
+})
+planned_b1 = [
+    PlannedFigure(figNumber=1, figType="system", title="The system", outline="", numerals=["102", "104", "106", "108"]),
+    PlannedFigure(figNumber=3, figType="record", title="The records", outline="", numerals=["302", "304"]),
+]
+ledger_b1 = [LedgerEntry(ref=r, feature=f) for r, f in [("102", "Citation Resolver"), ("104", "Release Step"), ("106", "Item Release"), ("108", "Normative Corpus"), ("302", "Draft"), ("304", "Item Provenance")]]
+graph_b1 = draw_from_plan(planned_b1, ledger_b1, "", flows={1: system, 3: records}, allowed={1: {"102", "104", "106", "108"}, 3: {"302", "304"}})
+by_fig = {f.figure_number: f for f in graph_b1.figures}
+check("B1: no drafter call for a system or records sheet given as a graph", len(calls), 0)
+check("B1: the system sheet's boxes, their numerals and shapes, as given",
+      [(n.label, n.reference_numeral, n.shape) for n in by_fig[1].nodes],
+      [("Citation Resolver", "102", "rectangle"), ("Release Step", "104", "rectangle"), ("Item Release", "106", "cylinder"), ("Normative Corpus", "108", "rectangle")])
+ids_b1 = {n.id: n.label for n in by_fig[1].nodes}
+check("B1: each record that passes between them is a line with its name",
+      sorted((ids_b1[e.source_id], ids_b1[e.target_id], e.label) for e in by_fig[1].edges),
+      sorted([("Normative Corpus", "Citation Resolver", "AUTHORITY PASSAGES"), ("Citation Resolver", "Release Step", "CITATION RESULTS"), ("Release Step", "Item Release", "RELEASE")]))
+check("B1: a records sheet with no line is drawn, each record with its fields",
+      [(n.label, n.reference_numeral, list(getattr(n, "fields", None) or [])) for n in by_fig[3].nodes],
+      [("Draft", "302", ["draft_id", "options"]), ("Item Provenance", "304", ["cell", "grammar_version"])])
+for f in graph_b1.figures:
+    render_figure(layout_figure(f))
+check("B1: both lay out and render", sorted(by_fig), [1, 3])
+llm_extractor._run_drafter = original_drafter
+
 if failures:
     print(f"\n{failures} check(s) failed")
     sys.exit(1)

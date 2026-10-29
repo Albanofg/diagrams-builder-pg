@@ -138,7 +138,15 @@ class PlanNode(BaseModel):
     id: str
     label: str
     numeral: Optional[str] = None
-    kind: Literal["start", "end", "connector", "decision", "process"] = "process"
+    # 2026-10-28 (the caller's plan 0038 B1): every figure kind can be given as a graph, so a
+    # system, record or hardware sheet carries its components, stores and records as boxes.
+    kind: Literal[
+        "start", "end", "connector", "decision", "process",
+        "component", "external", "datastore", "entity", "container", "interface", "actor",
+    ] = "process"
+    # A record's fields, and the box this one is drawn inside (a processor inside its computer).
+    fields: List[str] = Field(default_factory=list)
+    parent: Optional[str] = None
 
 
 class PlanEdge(BaseModel):
@@ -148,6 +156,10 @@ class PlanEdge(BaseModel):
     from_: str = Field(alias="from")
     to: str
     label: Optional[str] = None
+    # 2026-10-28 (plan 0038 B1): what the line is, for a sheet that is not a flowchart (a record
+    # made from another is "data"; a part of a whole is "structural"). Absent: control, or branch
+    # when it carries an answer.
+    kind: Optional[Literal["control", "data", "structural", "signal", "branch", "message", "transition"]] = None
 
 
 class PlanFlow(BaseModel):

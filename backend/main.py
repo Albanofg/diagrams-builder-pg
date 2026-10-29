@@ -151,7 +151,9 @@ def draw(
     flows = {
         f.figNumber: f.flow
         for f in request.plan.figures
-        if f.flow and f.flow.nodes and f.flow.edges
+        # 2026-10-28 (plan 0038 B1): a sheet that is not a flowchart may be given as boxes
+        # alone (a records sheet with no line between its records).
+        if f.flow and f.flow.nodes and (f.flow.edges or f.figType not in ("flowchart", "dataflow", "sequence", "state"))
     }
     allowed = {f.figNumber: set(f.numerals) for f in request.plan.figures}
     # (S4): a redraw with a note keeps the sheet as last drawn; each sheet's draft

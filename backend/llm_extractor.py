@@ -123,7 +123,9 @@ def draw_from_plan(
 
     def draft_of(figure: PlannedFigure) -> Optional[DraftFigure]:
         flow = flows.get(figure.figNumber)
-        if flow is not None and figure.figType in FLOW_LIKE:
+        # 2026-10-28 (the caller's plan 0038 B1): a sheet of any kind given as a graph is drawn
+        # as given, its drafter call skipped, as a flowchart has been since 2026-10-24.
+        if flow is not None and flow.nodes:
             return _draft_from_flow(figure, flow)
         return _run_drafter(figure, ledger_json, spec, previous.get(figure.figNumber))
 
@@ -175,6 +177,14 @@ FLOW_KIND = {
     "connector": "onpage-connector",
     "decision": "decision",
     "process": "process",
+    # 2026-10-28 (plan 0038 B1): the boxes of a system, record or hardware sheet.
+    "component": "component",
+    "external": "external",
+    "datastore": "datastore",
+    "entity": "entity",
+    "container": "container",
+    "interface": "interface",
+    "actor": "actor",
 }
 
 
@@ -189,6 +199,8 @@ def _draft_from_flow(figure: PlannedFigure, flow) -> Optional[DraftFigure]:
             type=FLOW_KIND.get(node.kind, "process"),
             label=node.label,
             ref=(node.numeral or "").strip(),
+            fields=list(node.fields or []),
+            parent=node.parent if node.parent in ids else None,
         )
         for node in flow.nodes
     ]
@@ -196,7 +208,7 @@ def _draft_from_flow(figure: PlannedFigure, flow) -> Optional[DraftFigure]:
         DraftEdge(
             **{"from": edge.from_},
             to=edge.to,
-            kind="branch" if (edge.label or "").strip() else "control",
+            kind=edge.kind or ("branch" if (edge.label or "").strip() else "control"),
             label=(edge.label or "").strip() or None,
         )
         for edge in flow.edges
