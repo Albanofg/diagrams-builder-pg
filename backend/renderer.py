@@ -125,6 +125,8 @@ class _GridRouter:
         self.used_axis: dict = {}   # cell -> {'h': count, 'v': count}
         # cells carrying structural bus lanes -> the two boxes each line on it joins
         self.trunk_used: dict = {}
+        # (box id, side) -> {'out': count, 'in': count}: arrowed lines at that side
+        self.ports: dict = {}
         self.committed: dict = {}   # edge key -> (cells, axis pairs, cost)
         for node in laid.nodes.values():
             left, top = node.x + ox, node.y + oy
@@ -169,7 +171,32 @@ class _GridRouter:
         index = round((value - origin - GRID / 2.0) / GRID)
         return origin + index * GRID + GRID / 2.0
 
-    def _anchor(self, node: LaidNode, side: str):
+    def _anchor(self, node: LaidNode, side: str, role: Optional[str] = None):
+        """Where a line meets a box's side. 2026-10-30 (the caller's plan 0044
+        F05): a line arriving and a line leaving on one side never share a
+        point, or the arrowhead of one sits on the start of the other and both
+        read as going the same way. When the side already carries a line the
+        other way, a leaving line attaches one lane before the middle and an
+        arriving line one lane after it."""
+        point = self._side_point(node, side)
+        if role is None or node.shape == "diamond":
+            return point
+        other = "in" if role == "out" else "out"
+        if not self.ports.get((node.id, side), {}).get(other):
+            return point
+        left, top = node.x + self.ox, node.y + self.oy
+        shift = -GRID if role == "out" else GRID
+        if side in ("left", "right"):
+            y = point[1] + shift
+            if top + 2.0 - 1e-6 <= y <= top + node.h - 2.0 + 1e-6:
+                return (point[0], y)
+        else:
+            x = point[0] + shift
+            if left + 2.0 - 1e-6 <= x <= left + node.w - 2.0 + 1e-6:
+                return (x, point[1])
+        return point
+
+    def _side_point(self, node: LaidNode, side: str):
         left, top = node.x + self.ox, node.y + self.oy
         right, bottom = left + node.w, top + node.h
         if node.shape == "diamond":
@@ -225,8 +252,9 @@ class _GridRouter:
                 best = self._try_anchor_pairs(source, target, all_sides,
                                               (entry_side,), trunk)
             if best is not None:
-                _, cells, points = best
-                self._commit(edge_key, cells, trunk, _ends(source, target))
+                _, cells, points, sides = best
+                self._commit(edge_key, cells, trunk, _ends(source, target),
+                             _ports(source, target, sides, trunk))
                 return points
 
         best = self._try_anchor_pairs(source, target, exits, entries, trunk)
@@ -236,12 +264,17 @@ class _GridRouter:
                                           all_sides, trunk)
         if best is None:
             return None
-        _, cells, points = best
-        self._commit(edge_key, cells, trunk, _ends(source, target))
+        _, cells, points, sides = best
+        self._commit(edge_key, cells, trunk, _ends(source, target),
+                     _ports(source, target, sides, trunk))
         return points
 
-    def _commit(self, edge_key, cells, trunk: bool, ends=frozenset()) -> None:
+    def _commit(self, edge_key, cells, trunk: bool, ends=frozenset(),
+                ports=()) -> None:
         commit = TRUNK_COST if trunk else USED_COST
+        for port, role in ports:
+            uses = self.ports.setdefault(port, {"out": 0, "in": 0})
+            uses[role] += 1
         axis_pairs = []
         prev = None
         for cell in cells:
@@ -257,14 +290,18 @@ class _GridRouter:
             prev = cell
         if edge_key is not None:
             self.committed[edge_key] = (list(cells), axis_pairs, commit,
-                                        trunk, ends)
+                                        trunk, ends, tuple(ports))
 
     def uncommit(self, edge_key) -> None:
         """Rip up a routed edge so it can be re-routed against full traffic."""
         entry = self.committed.pop(edge_key, None)
         if entry is None:
             return
-        cells, axis_pairs, commit, trunk, ends = entry
+        cells, axis_pairs, commit, trunk, ends, ports = entry
+        for port, role in ports:
+            uses = self.ports.get(port)
+            if uses:
+                uses[role] = max(0, uses[role] - 1)
         for cell in cells:
             remaining = self.used.get(cell, 0) - commit
             if remaining > 0:
@@ -338,14 +375,15 @@ class _GridRouter:
                 result = self._astar(source, exit_side, target, entry_side,
                                      trunk)
                 if result and (best is None or result[0] < best[0]):
-                    best = result
+                    best = result + ((exit_side, entry_side),)
         return best
 
     def _astar(self, source, exit_side, target, entry_side, trunk=False):
         import heapq
 
-        start_pt = self._anchor(source, exit_side)
-        goal_pt = self._anchor(target, entry_side)
+        # Headless structural lines have no direction: they share points freely.
+        start_pt = self._anchor(source, exit_side, None if trunk else "out")
+        goal_pt = self._anchor(target, entry_side, None if trunk else "in")
         start = self._outside_cell(start_pt, exit_side)
         goal = self._outside_cell(goal_pt, entry_side)
         allow = {start, goal}
@@ -488,6 +526,13 @@ class _GridRouter:
 def _ends(source, target) -> frozenset:
     """The two boxes a line joins, by id."""
     return frozenset((source.id, target.id))
+
+
+def _ports(source, target, sides, trunk: bool) -> tuple:
+    """The box sides an arrowed line leaves and arrives at, for _anchor."""
+    if trunk:
+        return ()
+    return (((source.id, sides[0]), "out"), ((target.id, sides[1]), "in"))
 
 
 def _heading(p, q) -> Tuple[int, int]:

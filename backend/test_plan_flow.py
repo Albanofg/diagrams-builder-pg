@@ -299,6 +299,65 @@ check("B2: no two lines that meet no box in common run on one lane", round(share
 check("B2: the drafter's 6 lines are all drawn", len(routes_b2), 6)
 llm_extractor._run_drafter = original_drafter
 
+# -- F05 (2026-10-30, the caller's plan 0044): a line arriving and a line leaving one
+# side of a box never share a point. A system sheet with a two-way pair (assembled
+# paper up to the reviewer, correction findings back down) drew both arrowheads into
+# the assembler, and the reviewer's incoming arrow on the start of its release line.
+pair = PlanFlow.model_validate({
+    "nodes": [
+        {"id": "n1", "label": "SOURCE INTERFACE", "numeral": "102", "kind": "component"},
+        {"id": "n2", "label": "SOURCE INDEXER", "numeral": "104", "kind": "component"},
+        {"id": "n3", "label": "SCOPE RESOLVER", "numeral": "108", "kind": "component"},
+        {"id": "n4", "label": "INCLUSION WORKER", "numeral": "110", "kind": "component"},
+        {"id": "n5", "label": "PAPER REVIEWER", "numeral": "116", "kind": "component"},
+        {"id": "n6", "label": "PASSAGE RETRIEVAL", "numeral": "106", "kind": "component"},
+        {"id": "n7", "label": "OPTIONAL SELECTOR", "numeral": "112", "kind": "component"},
+        {"id": "n8", "label": "PUBLICATION ASSEMBLER", "numeral": "114", "kind": "component"},
+        {"id": "n9", "label": "RELEASE PROCESS", "numeral": "118", "kind": "component"},
+    ],
+    "edges": [
+        {"from": "n1", "to": "n2", "label": "published material", "kind": "data"},
+        {"from": "n1", "to": "n3", "label": "pinned material", "kind": "data"},
+        {"from": "n1", "to": "n4", "label": "pinned material", "kind": "data"},
+        {"from": "n1", "to": "n5", "label": "pinned material", "kind": "data"},
+        {"from": "n2", "to": "n6", "label": "source index", "kind": "data"},
+        {"from": "n2", "to": "n3", "label": "relationship entries", "kind": "data"},
+        {"from": "n2", "to": "n4", "label": "indexed versions", "kind": "data"},
+        {"from": "n2", "to": "n5", "label": "source index", "kind": "data"},
+        {"from": "n6", "to": "n3", "label": "relevant candidates", "kind": "data"},
+        {"from": "n6", "to": "n4", "label": "relevant candidates", "kind": "data"},
+        {"from": "n3", "to": "n4", "label": "referent findings", "kind": "data"},
+        {"from": "n4", "to": "n7", "label": "admitted groups", "kind": "data"},
+        {"from": "n4", "to": "n8", "label": "admitted groups", "kind": "data"},
+        {"from": "n7", "to": "n8", "label": "optional selections", "kind": "data"},
+        {"from": "n8", "to": "n5", "label": "assembled paper", "kind": "data"},
+        {"from": "n5", "to": "n9", "label": "release decision", "kind": "data"},
+        {"from": "n5", "to": "n8", "label": "correction findings", "kind": "data"},
+    ],
+})
+pair_numerals = [n["numeral"] for n in pair.model_dump()["nodes"]]
+graph_f5 = draw_from_plan(
+    [PlannedFigure(figNumber=1, figType="system", title="The system", outline="", numerals=pair_numerals)],
+    [LedgerEntry(ref=n["numeral"], feature=n["label"]) for n in pair.model_dump()["nodes"]],
+    "", flows={1: pair}, allowed={1: set(pair_numerals)},
+)
+lanes_f5 = {}
+
+
+def keep_routes_f5(routes, router, *args, **kwargs):
+    lanes_f5["routes"] = original_consolidate(routes, router, *args, **kwargs)
+    return lanes_f5["routes"]
+
+
+renderer._consolidate_lanes = keep_routes_f5
+render_figure(layout_figure(graph_f5.figures[0]))
+renderer._consolidate_lanes = original_consolidate
+check("F05: no line arrives at a box where another leaves it (the layout audit agrees)",
+      [a for a in (renderer.LAST_AUDIT or []) if "where another leaves" in a], [])
+starts = {(e.source_id, tuple(round(v, 3) for v in p[0])) for e, p in lanes_f5["routes"]}
+ends = {(e.target_id, tuple(round(v, 3) for v in p[-1])) for e, p in lanes_f5["routes"]}
+check("F05: every arrowhead sits on a point no line leaves from", sorted(starts & ends), [])
+
 if failures:
     print(f"\n{failures} check(s) failed")
     sys.exit(1)
